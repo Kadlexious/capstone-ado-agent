@@ -142,28 +142,92 @@ class AdoClient:
                 ids.add(target["id"])
         return sorted(ids)
 
+    def get_portfolio_task_rollups(self, epic_ids: list[int]) -> dict[int, dict[str, float]]:
+        """Calcula el rollup de OriginalEstimate/Completed/Remaining Work de todas las Tasks
+        para una lista de Epics en un solo lote de consultas recursivas y batch API."""
+        if not epic_ids:
+            return {}
+            
+        # 1. Consulta recursiva WIQL para obtener todos los descendientes de todos los Epics a la vez
+        ids_str = ", ".join(map(str, epic_ids))
+        project_segment = requests.utils.quote(self.project) if self.project else ""
+        wiql = {
+            "query": (
+                "SELECT [System.Id] FROM WorkItemLinks "
+                f"WHERE ([Source].[System.Id] IN ({ids_str})) "
+                "AND ([System.Links.LinkType] = 'System.LinkTypes.Hierarchy-Forward') "
+                "MODE (Recursive)"
+            )
+        }
+        url = f"{self.base}/{project_segment}/_apis/wit/wiql?api-version={API_VERSION}"
+        result = self._post(url, wiql)
+        
+        # 2. Construir mapa de parent -> children en memoria
+        adj = {}
+        for rel in result.get("workItemRelations", []):
+            source = rel.get("source")
+            target = rel.get("target")
+            if source and target:
+                src_id = source["id"]
+                tgt_id = target["id"]
+                adj.setdefault(src_id, []).append(tgt_id)
+                
+        # 3. Recorrer el mapa localmente para encontrar todos los descendientes de cada Epic
+        epic_descendants = {}
+        all_descendant_ids = set()
+        for epic_id in epic_ids:
+            descendants = set()
+            queue = [epic_id]
+            visited = set()
+            while queue:
+                current = queue.pop(0)
+                if current in visited:
+                    continue
+                visited.add(current)
+                children = adj.get(current, [])
+                for child in children:
+                    descendants.add(child)
+                    queue.append(child)
+            epic_descendants[epic_id] = descendants
+            all_descendant_ids.update(descendants)
+            
+        # 4. Traer los campos de todos los descendientes en un solo batch
+        if not all_descendant_ids:
+            return {epic_id: {"estimate": 0.0, "completed": 0.0, "remaining": 0.0} for epic_id in epic_ids}
+            
+        fields = [
+            "System.Id",
+            "System.WorkItemType",
+            "Microsoft.VSTS.Scheduling.OriginalEstimate",
+            "Microsoft.VSTS.Scheduling.CompletedWork",
+            "Microsoft.VSTS.Scheduling.RemainingWork"
+        ]
+        items = self.get_work_items_batch(list(all_descendant_ids), fields)
+        
+        item_map = {}
+        for item in items:
+            item_map[item.get("id")] = item.get("fields", {})
+            
+        # 5. Agrupar y sumar métricas por Epic
+        rollups = {}
+        for epic_id in epic_ids:
+            estimate = 0.0
+            completed = 0.0
+            remaining = 0.0
+            for desc_id in epic_descendants[epic_id]:
+                f = item_map.get(desc_id)
+                if f and f.get("System.WorkItemType") == "Task":
+                    estimate += float(f.get("Microsoft.VSTS.Scheduling.OriginalEstimate", 0) or 0)
+                    completed += float(f.get("Microsoft.VSTS.Scheduling.CompletedWork", 0) or 0)
+                    remaining += float(f.get("Microsoft.VSTS.Scheduling.RemainingWork", 0) or 0)
+            rollups[epic_id] = {"estimate": estimate, "completed": completed, "remaining": remaining}
+            
+        return rollups
+
     def get_task_hours_rollup(self, epic_id: int) -> dict[str, float]:
         """Suma OriginalEstimate/Completed/Remaining Work de todas las Tasks bajo un Epic."""
-        descendant_ids = self.get_descendant_ids(epic_id)
-        if not descendant_ids:
-            return {"estimate": 0.0, "completed": 0.0, "remaining": 0.0}
-        items = self.get_work_items_batch(
-            descendant_ids,
-            ["System.WorkItemType",
-             "Microsoft.VSTS.Scheduling.OriginalEstimate",
-             "Microsoft.VSTS.Scheduling.CompletedWork",
-             "Microsoft.VSTS.Scheduling.RemainingWork"],
-        )
-        estimate = 0.0
-        completed = 0.0
-        remaining = 0.0
-        for wi in items:
-            f = wi.get("fields", {})
-            if f.get("System.WorkItemType") == "Task":
-                estimate += float(f.get("Microsoft.VSTS.Scheduling.OriginalEstimate", 0) or 0)
-                completed += float(f.get("Microsoft.VSTS.Scheduling.CompletedWork", 0) or 0)
-                remaining += float(f.get("Microsoft.VSTS.Scheduling.RemainingWork", 0) or 0)
-        return {"estimate": estimate, "completed": completed, "remaining": remaining}
+        rollups = self.get_portfolio_task_rollups([epic_id])
+        return rollups.get(epic_id, {"estimate": 0.0, "completed": 0.0, "remaining": 0.0})
 
 
 def _client_from_env(org: str | None, project: str | None, pat: str | None) -> AdoClient:
@@ -215,11 +279,15 @@ def get_portfolio_status(
         epic_ids = client.query_epics_under(area_path)
         items = client.get_work_items_batch(epic_ids, PORTFOLIO_FIELDS)
 
+        # Bulk rollup task hours to avoid N+1 queries
+        rollups = client.get_portfolio_task_rollups(epic_ids)
+
         epics = []
         for wi in items:
             f = wi.get("fields", {})
+            epic_id = wi.get("id")
             epic_estimate = float(f.get("Microsoft.VSTS.Scheduling.OriginalEstimate", 0) or 0)
-            rollup = client.get_task_hours_rollup(wi.get("id"))
+            rollup = rollups.get(epic_id, {"estimate": 0.0, "completed": 0.0, "remaining": 0.0})
             completed = rollup["completed"]
             remaining = rollup["remaining"]
             tasks_estimate = rollup["estimate"]
@@ -227,7 +295,7 @@ def get_portfolio_status(
             consumption_pct = round((completed / planned_total) * 100, 1) if planned_total else 0.0
             epics.append(
                 {
-                    "id": wi.get("id"),
+                    "id": epic_id,
                     "title": _redact(f.get("System.Title", "")),
                     "state": f.get("System.State"),
                     "hours_planned": planned_total,
