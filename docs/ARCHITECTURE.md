@@ -1,93 +1,48 @@
-# Arquitectura - ADO Portfolio Risk Agent
+# Architecture - ADO Portfolio Risk Agent
 
-## Problema de negocio
+## Business Problem
 
-Los leads de una tribu de DevOps (ej. Medios de Pago / Interdin-Diners)
-revisan manualmente, epic por epic, si el consumo de horas en Azure DevOps
-esta alineado con el presupuesto y el cronograma. Es un trabajo repetitivo,
-propenso a error humano, y que no escala cuando hay muchos Epics activos en
-paralelo. Ademas, cualquier automatizacion que lea texto libre de tickets
-(titulos, comentarios) queda expuesta a datos sensibles (PII) o incluso a
-manipulacion deliberada del texto para "engañar" al sistema.
+DevOps Tribe Leads (e.g., Payment Methods / Interdin-Diners) manually audit hours consumed against budgets and schedules across every Azure DevOps Epic. This manual process is repetitive, error-prone, and fails to scale with a large number of concurrent active Epics. Furthermore, any automation that directly reads unstructured user input (such as ticket titles or descriptions) is vulnerable to exposure of personally identifiable information (PII) or intentional prompt injection designed to bypass system controls.
 
-## Solucion
+## Solution
 
-Un agente ADK 2.0 que automatiza la primera pasada de este triage:
-consulta el portafolio, calcula el riesgo, y solo pide tiempo humano cuando
-de verdad hace falta (Epics en riesgo o con contenido sospechoso), en vez de
-para cada Epic.
+The ADO Portfolio Risk Agent automates this triage process using a workflow graph. It fetches the active portfolio metrics, automatically routes items based on risk and security checks, and only requests manual human intervention for Epics identified as high-risk or containing suspicious content.
 
-```
-                     ┌─────────────────────┐
-   area_path  ─────► │  fetch_portfolio     │  (MCP: ado-devops-portfolio)
-                     │  (funcion, sin LLM)  │
-                     └──────────┬──────────┘
-                                │ lista de epics
-                                ▼
-                     ┌─────────────────────┐
-                     │  security_screen     │  redact_pii() +
-                     │  (funcion, sin LLM)  │  detect_prompt_injection()
-                     └──────────┬──────────┘
-                       ┌────────┴────────┐
-              limpios  │                 │  security_flag = true
-                       ▼                 │
-             ┌───────────────────┐       │
-             │ clasificar umbral │       │
-             │  (config.py)      │       │
-             └─────────┬─────────┘       │
-        on_track       │ at_risk/        │
-        (< 80%)        │ critical        │
-             │         ▼                 │
-             │  ┌───────────────┐        │
-             │  │ risk_analysis  │       │
-             │  │ (LlmAgent)     │       │
-             │  └───────┬───────┘        │
-             │          ▼                ▼
-             │   ┌──────────────────────────┐
-             │   │ human_review (RequestInput)│
-             │   └──────────────┬───────────┘
-             │                  ▼
-             │        ┌───────────────────┐
-             │        │  draft_briefing    │  skill: ado-risk-briefing
-             │        │  (LlmAgent + skill)│
-             │        └─────────┬─────────┘
-             └──────────────────┼─────────────┐
-                                 ▼             ▼
-                          ┌─────────────────────────┐
-                          │     final_summary        │
-                          └─────────────────────────┘
+```mermaid
+graph TD
+    Start([Input: area_path]) --> FP[fetch_portfolio]
+    FP --> SS[security_screen]
+    SS --> TR{threshold_routing}
+    
+    TR -- "no_risk (consumption_pct < 95%)" --> FS[final_summary]
+    TR -- "has_risk (consumption_pct >= 95%)" --> RA[risk_analysis]
+    TR -- "has_flagged (security_flag = true)" --> HR
+    
+    RA --> HR[human_review]
+    HR --> DB[draft_briefing]
+    DB --> FS
 ```
 
-## Mapeo a conceptos del curso
+## Concept Mapping
 
-| Concepto (dia del curso) | Donde se aplica |
+| Concept | Application in Codebase |
 |---|---|
-| ADK 2.0 graph workflow, multi-nodo (Dia 3) | `app/agent.py`: `fetch_portfolio` -> `security_screen` -> ruteo condicional -> `risk_analysis` (LLM) -> `RequestInput` -> `draft_briefing` -> `final_summary` |
-| Servidores MCP (Dia 2) | `mcp_server/ado_devops_mcp.py`: servidor MCP real con las herramientas `get_portfolio_status` y `get_epic_detail`, autenticado con PAT via Basic Auth |
-| Agent Skills (Dia 3) | `.agents/skills/ado-risk-briefing/SKILL.md`: se carga solo cuando hay datos de riesgo que resumir (progressive disclosure) |
-| Seguridad y evaluacion (Dia 4) | `security/redaction.py` (PII + prompt injection, con 9 tests unitarios pasando), `.agents/CONTEXT.md` (paved roads + TDD planning gate), human-in-the-loop obligatorio para riesgo alto |
-| (Opcional) Produccion (Dia 5) | Paso 7 de `PROMPTS_FOR_ANTIGRAVITY.md`: deploy a Agent Runtime |
+| Graph Workflow (Multi-node) | Located in [app/agent.py](../app/agent.py): orchestrates execution through `fetch_portfolio` -> `security_screen` -> conditional routing -> `risk_analysis` -> `human_review` -> `draft_briefing` -> `final_summary`. |
+| MCP Servers | Located in [mcp_server/ado_devops_mcp.py](../mcp_server/ado_devops_mcp.py): exposes the `get_portfolio_status` and `get_epic_detail` tools, authenticated with Azure DevOps Basic Authentication (PAT). |
+| Agent Skills | Located in [.agents/skills/ado-risk-briefing/SKILL.md](../.agents/skills/ado-risk-briefing/SKILL.md): loaded dynamically to generate functional, non-technical executive briefs for approved risk alerts. |
+| Security & Validation | Located in [security/redaction.py](../security/redaction.py): handles PII redaction and prompt injection detection with unit tests. |
+| Staging & Production Deployment | Not implemented in this submission; deploying to Agent Runtime is a natural next step. |
 
-## Por que "Agents for Business"
+## Business Value
 
-Resuelve un problema real de gestion de portafolios de proyectos (consumo de
-horas vs. presupuesto), reduce el tiempo de un lead de tribu en revision
-manual, y demuestra valor de negocio medible: menos horas de revision
-manual, deteccion temprana de sobrecostos, y una capa de seguridad que
-protege contra manipulacion de datos y fuga de informacion sensible - un
-requisito no negociable al automatizar sobre datos corporativos reales.
+This agent addresses the operational challenges of DevOps portfolio management (hours consumed vs. budget) by significantly reducing the manual auditing overhead for Tribe Leads. Key benefits include:
+- Reduced manual triage time by auto-approving on-track items.
+- Early detection of cost overruns and deviations.
+- Upstream security sanitization that safeguards against data manipulation and sensitive data leaks.
 
-## Decisiones de diseño y por que
+## Design Decisions
 
-- **El MCP server es de solo lectura.** Deliberado: un agente de este tipo
-  nunca deberia poder escribir/cerrar Epics en ADO automaticamente; solo
-  informa y sugiere.
-- **Los umbrales de riesgo viven en codigo, no en el prompt del LLM.** Un
-  LLM puede alucinar o ser manipulado; un `if consumption_pct > 100` no.
-- **El LLM nunca ve texto sin pasar por `security_screen` primero.** Esto
-  es upstream de cualquier prompt injection posible desde un titulo o
-  comentario de ADO.
-- **Human-in-the-loop es obligatorio para riesgo alto, no opcional.** El
-  agente acelera el triage, pero la decision de escalar sigue siendo
-  humana - alineado con el pilar de "Effective Trust" del whitepaper de
-  seguridad del Dia 4.
+- **Read-Only MCP Interface**: The MCP server is intentionally restricted to read-only operations. The agent should only inform and suggest, never write or close Epics automatically in Azure DevOps.
+- **Deterministic Risk Thresholds**: Risk categorization thresholds live directly in code ([app/config.py](../app/config.py)) rather than inside LLM system prompts to prevent hallucination and prompt-based manipulation.
+- **Sanitization Before Processing**: The security screen runs upstream of any LLM node, ensuring that all unstructured text is sanitized and checked before it can influence agent logic.
+- **Mandatory Human-in-the-Loop**: High-risk or flagged Epics require explicit human approval to issue an executive alert, ensuring that authority remains with the DevOps lead.
