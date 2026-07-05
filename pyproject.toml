@@ -1,0 +1,19 @@
+[project]
+name = "ado-portfolio-risk-agent"
+version = "0.1.0"
+description = "Capstone: 5-Day AI Agents Intensive Vibe Coding Course With Google - Agents for Business track"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31",
+    "mcp[cli]>=1.0",
+    "pydantic>=2.0",
+    "pytest>=8.0",
+    # Antigravity agregara aqui google-adk y fastapi cuando escaneas el
+    # grafo con agents-cli scaffold (Paso 3 de PROMPTS_FOR_ANTIGRAVITY.md).
+    "google-adk[gcp]>=2.0.0,<3.0.0",
+    "a2a-sdk[http-server]~=0.3.22",
+    "aiohttp>=3.13.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

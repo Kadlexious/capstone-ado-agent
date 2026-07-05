@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+artifacts/
+deployment_metadata.json
+app/adk/session.db
+tests/adk/session.db
