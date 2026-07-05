@@ -4,5 +4,5 @@ __pycache__/
 .pytest_cache/
 artifacts/
 deployment_metadata.json
-app/adk/session.db
-tests/adk/session.db
+app/.adk/
+tests/.adk/
